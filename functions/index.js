@@ -4,15 +4,18 @@ const axios = require("axios");
 const cors = require("cors")({ origin: true });
 
 admin.initializeApp();
+const db = admin.firestore();
 
-// 🔐 PayPal Sandbox Credentials (replace later)
+// ===============================
+// 💳 PAYPAL CONFIG
+// ===============================
 const PAYPAL_CLIENT_ID = "YOUR_PAYPAL_CLIENT_ID";
 const PAYPAL_SECRET = "YOUR_PAYPAL_SECRET";
 
 // ===============================
 // 💳 CREATE PAYPAL ORDER
 // ===============================
-exports.createPayPalOrder = functions.https.onRequest((req, res) => {
+exports.createOrder = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {
     try {
       const auth = Buffer.from(
@@ -40,7 +43,7 @@ exports.createPayPalOrder = functions.https.onRequest((req, res) => {
             {
               amount: {
                 currency_code: "USD",
-                value: "10.00",
+                value: req.body.amount || "10.00",
               },
             },
           ],
@@ -48,57 +51,85 @@ exports.createPayPalOrder = functions.https.onRequest((req, res) => {
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
           },
         }
       );
 
       res.json(orderRes.data);
-    } catch (error) {
-      console.error(error);
-      res.status(500).send("PayPal error");
+    } catch (err) {
+      console.error(err);
+      res.status(500).send("Error creating order");
     }
   });
 });
 
 // ===============================
-// 💳 CAPTURE PAYPAL PAYMENT
+// 📦 SAVE ORDER
 // ===============================
-exports.capturePayPalOrder = functions.https.onRequest((req, res) => {
+exports.saveOrder = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {
     try {
-      const { orderID } = req.body;
+      const { userId, amount } = req.body;
 
-      const auth = Buffer.from(
-        PAYPAL_CLIENT_ID + ":" + PAYPAL_SECRET
-      ).toString("base64");
+      const order = await db.collection("orders").add({
+        userId,
+        amount,
+        status: "pending",
+        createdAt: new Date(),
+      });
 
-      const tokenRes = await axios.post(
-        "https://api-m.sandbox.paypal.com/v1/oauth2/token",
-        "grant_type=client_credentials",
-        {
-          headers: {
-            Authorization: `Basic ${auth}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-        }
-      );
+      res.json({ id: order.id });
+    } catch (err) {
+      res.status(500).send(err);
+    }
+  });
+});
 
-      const accessToken = tokenRes.data.access_token;
+// ===============================
+// 🔗 CREATE REFERRAL CODE
+// ===============================
+exports.createReferral = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const { userId } = req.body;
 
-      const captureRes = await axios.post(
-        `https://api-m.sandbox.paypal.com/v2/checkout/orders/${orderID}/capture`,
-        {},
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        }
-      );
+      const code = userId.slice(0, 5) + Math.floor(Math.random() * 10000);
 
-      res.json(captureRes.data);
-    } catch (error) {
-      console.error(error);
-      res.status(500).send("Capture error");
+      await db.collection("referrals").doc(code).set({
+        userId,
+        earnings: 0,
+        createdAt: new Date(),
+      });
+
+      res.json({ code });
+    } catch (err) {
+      res.status(500).send(err);
+    }
+  });
+});
+
+// ===============================
+// 💰 APPLY REFERRAL
+// ===============================
+exports.applyReferral = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const { code } = req.body;
+
+      const ref = await db.collection("referrals").doc(code).get();
+
+      if (!ref.exists) {
+        return res.status(404).send("Invalid code");
+      }
+
+      await db.collection("referrals").doc(code).update({
+        earnings: admin.firestore.FieldValue.increment(1),
+      });
+
+      res.send("Referral applied");
+    } catch (err) {
+      res.status(500).send(err);
     }
   });
 });
